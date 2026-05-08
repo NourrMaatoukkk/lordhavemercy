@@ -1,127 +1,123 @@
-setwd("c:/Users/ahmed/ai-classroom")
+setwd("/Users/nourmaatouk/Desktop/prefinaladv/AI-CLASSTEST2")
 
-if (.Platform$OS.type == "windows") {
-  system("cmd /c start python ai_engine.py", wait = FALSE)
-  Sys.sleep(3)
-  system("cmd /c start python dashboard.py", wait = FALSE)
-} else {
-  system("python3 ai_engine.py &", wait = FALSE)
-  Sys.sleep(3)
-  system("python3 dashboard.py &", wait = FALSE)
-}
+# Don't start Python - it's already running separately
 
 library(shiny)
 library(ggplot2)
 library(dplyr)
-library(gridExtra)
 
 CSV_FILE <- "emotion_log.csv"
 
 ui <- fluidPage(
-  titlePanel("Professor Dashboard: Attendance & Stats"),
-  sidebarLayout(
-    sidebarPanel(
-      actionButton("refresh", "Update Live Feed"),
-      downloadButton("report", "Generate PDF Report"),
-      hr(),
-      h4("Attendance"),
-      tableOutput("attendance_list")
+  titlePanel("Professor Dashboard: Attendance & Emotions"),
+  
+  fluidRow(
+    column(4,
+      h4("Statistics"),
+      tableOutput("stats_table"),
+      actionButton("refresh", "Refresh", class = "btn-primary"),
+      actionButton("download_report", "Download Report", class = "btn-success")
     ),
-    mainPanel(
-      plotOutput("trendPlot"),
-      h4("BA304 Statistical Summary"),
-      tableOutput("stats_table")
+    column(8,
+      h4("Emotion Distribution"),
+      plotOutput("emotion_plot")
     )
-  )
+  ),
+  
+  hr(),
+  
+  fluidRow(
+    column(12,
+      h4("Attendance List"),
+      tableOutput("attendance_table")
+    )
+  ),
+  
+  fluidRow(
+    column(12,
+      h4("Confidence Trend"),
+      plotOutput("trend_plot")
+    )
+  ),
+  
+  tags$script(HTML("setInterval(function() { Shiny.onInputChange('refresh_trigger', Date.now()); }, 3000);"))
 )
 
 server <- function(input, output) {
   
-  data_load <- reactive({
+  load_data <- reactive({
     input$refresh
-    req(file.exists(CSV_FILE))
+    input$refresh_trigger
     
-    df <- read.csv(CSV_FILE, stringsAsFactors = FALSE)
-    
-    req(nrow(df) > 0)
-    req(all(c("Student_ID", "Emotion", "Confidence") %in% names(df)))
-    
-    df <- df %>%
-      mutate(
-        Emotion = tolower(trimws(Emotion)),
-        Confidence = suppressWarnings(as.numeric(Confidence)),
-        Confidence = ifelse(is.na(Confidence), 0, Confidence)
-      )
-    
-    df %>% mutate(
-      EmotionWeight = case_when(
-        Emotion %in% c("happy", "neutral", "surprise") ~ 1.0,
-        Emotion %in% c("sad", "angry", "fear", "disgust") ~ 0.2,
-        TRUE ~ 0.5
-      ),
-      Score = pmin(1, pmax(0, EmotionWeight * Confidence))
-    )
-  })
-  
-  output$attendance_list <- renderTable({
-    data_load() %>%
-      group_by(Student_ID) %>%
-      summarize(Engagement = round(mean(Score), 2))
+    if (file.exists(CSV_FILE)) {
+      tryCatch({
+        df <- read.csv(CSV_FILE, stringsAsFactors = FALSE)
+        if (nrow(df) > 0) {
+          df$Emotion <- tolower(trimws(df$Emotion))
+          df$Confidence <- suppressWarnings(as.numeric(df$Confidence))
+          df$Confidence <- ifelse(is.na(df$Confidence), 0, df$Confidence)
+          return(df)
+        }
+      }, error = function(e) { return(data.frame()) })
+    }
+    return(data.frame())
   })
   
   output$stats_table <- renderTable({
-    df <- data_load()
-    m <- mean(df$Score, na.rm = TRUE)
-    s <- sd(df$Score, na.rm = TRUE)
-    cv <- ifelse(m == 0, NA, (s / m) * 100)
-    
+    df <- load_data()
+    if (nrow(df) == 0) {
+      return(data.frame(Metric = "Loading...", Value = "-"))
+    }
     data.frame(
-      Metric = c("Mean Engagement", "Consistency (CV %)"),
-      Value = c(
-        round(m, 2),
-        ifelse(is.na(cv), "N/A", paste0(round(cv, 1), "%"))
-      )
+      Metric = c("Total Samples", "Students", "Avg Confidence"),
+      Value = c(nrow(df), length(unique(df$Student_ID)), 
+                paste0(round(mean(df$Confidence, na.rm=T)*100), "%"))
     )
   })
   
-  output$trendPlot <- renderPlot({
-    df <- data_load()
+  output$emotion_plot <- renderPlot({
+    df <- load_data()
+    if (nrow(df) == 0) { plot(1, main="Waiting for data..."); return() }
     
-    ggplot(df, aes(x = 1:nrow(df), y = Score, color = Student_ID)) + 
-      geom_line() +
-      theme_minimal() +
-      labs(
-        x = "Time",
-        y = "Engagement",
-        title = "Live Student Trends"
-      )
+    emotion_counts <- df %>% group_by(Emotion) %>% 
+      summarize(Count = n(), .groups = "drop") %>% arrange(desc(Count))
+    
+    ggplot(emotion_counts, aes(x = reorder(Emotion, Count), y = Count, fill = Emotion)) +
+      geom_bar(stat = "identity") + coord_flip() + theme_minimal() +
+      labs(x = "", y = "Count") + theme(legend.position = "none")
   })
   
-  output$report <- downloadHandler(
-    filename = function() {
-      paste("Class_Report_", Sys.Date(), ".pdf", sep = "")
-    },
-    content = function(file) {
-      pdf(file, width = 8, height = 11)
-      df <- data_load()
-      
-      plot.new()
-      text(0.5, 0.9, "Automated Classroom Analysis Report", cex = 1.5, font = 2)
-      text(0.5, 0.8, paste("Mean Engagement:", round(mean(df$Score), 2)))
-      
-      p1 <- ggplot(df, aes(x = Emotion, fill = Emotion)) +
-        geom_bar() +
-        labs(title = "Overall Emotion Distribution")
-      
-      print(p1)
-      dev.off()
+  output$attendance_table <- renderTable({
+    df <- load_data()
+    if (nrow(df) == 0) { return(data.frame(Student = "-", Count = "-")) }
+    
+    df %>% group_by(Student_ID) %>%
+      summarize(Detections = n(), Avg_Confidence = round(mean(Confidence, na.rm=T), 2), .groups="drop") %>%
+      head(20)
+  })
+  
+  output$trend_plot <- renderPlot({
+    df <- load_data()
+    if (nrow(df) < 2) { plot(1, main="Need more data..."); return() }
+    
+    df <- tail(df, 100)
+    df$Index <- 1:nrow(df)
+    
+    ggplot(df, aes(x = Index, y = Confidence, color = Emotion)) +
+      geom_line(alpha = 0.6) + geom_point(size = 2) + theme_minimal() +
+      labs(x = "Time", y = "Confidence Score", title = "Emotion Confidence Over Time")
+  })
+  
+  observeEvent(input$download_report, {
+    df <- load_data()
+    if (nrow(df) == 0) {
+      showNotification("No data to download", type = "error")
+      return()
     }
-  )
+    filename <- paste0("emotion_report_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+    write.csv(df, filename, row.names = FALSE)
+    showNotification(paste("Saved to", filename), type = "message")
+  })
 }
 
-runApp(
-  list(ui = ui, server = server),
-  host = "0.0.0.0",
-  port = 1234,
-  launch.browser = TRUE
-)
+runApp(list(ui = ui, server = server), host = "0.0.0.0", port = 1235, launch.browser = FALSE)
